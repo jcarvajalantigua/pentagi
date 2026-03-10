@@ -1,1 +1,1 @@
-export const baseUrl = '/api/v1';
+export const baseUrl = '/axion/api/v1';

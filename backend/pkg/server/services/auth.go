@@ -14,6 +14,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"pentagi/pkg/server/logger"
@@ -25,6 +26,7 @@ import (
 
 	"github.com/gin-contrib/sessions"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/jinzhu/gorm"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/crypto/bcrypt"
@@ -41,13 +43,19 @@ type AuthServiceConfig struct {
 	BaseURL          string
 	LoginCallbackURL string
 	SessionTimeout   int // in seconds
+	AxionSSOEnabled  bool
+	AxionSSOSecret   string
+	AxionSSOIssuer   string
+	AxionSSOAudience string
 }
 
 type AuthService struct {
-	cfg   AuthServiceConfig
-	db    *gorm.DB
-	key   []byte
-	oauth map[string]oauth.OAuthClient
+	cfg       AuthServiceConfig
+	db        *gorm.DB
+	key       []byte
+	oauth     map[string]oauth.OAuthClient
+	ssoJTILock sync.Mutex
+	ssoJTISeen map[string]int64
 }
 
 func NewAuthService(
@@ -67,11 +75,211 @@ func NewAuthService(
 	}
 
 	return &AuthService{
-		cfg:   cfg,
-		db:    db,
-		key:   key,
-		oauth: oauth,
+		cfg:        cfg,
+		db:         db,
+		key:        key,
+		oauth:      oauth,
+		ssoJTISeen: map[string]int64{},
 	}
+}
+
+type segrdSSOClaims struct {
+	Email         string `json:"email"`
+	Name          string `json:"name"`
+	Role          string `json:"role"`
+	RoleID        int64  `json:"role_id"`
+	SegrdUserID   string `json:"segrd_user_id"`
+	SegrdTenantID string `json:"segrd_tenant_id"`
+	TenantSlug    string `json:"tenant_slug"`
+	jwt.RegisteredClaims
+}
+
+func normalizeAxionReturnURL(input string) string {
+	const fallback = "/axion/flows"
+	if strings.TrimSpace(input) == "" {
+		return fallback
+	}
+
+	u, err := url.Parse(input)
+	if err != nil {
+		return fallback
+	}
+	if u.IsAbs() || strings.HasPrefix(input, "//") {
+		return fallback
+	}
+
+	pathPart := path.Clean("/" + strings.TrimPrefix(u.Path, "/"))
+	if !strings.HasPrefix(pathPart, "/axion/") && pathPart != "/axion" {
+		pathPart = path.Join("/axion", pathPart)
+	}
+	if pathPart == "/axion" {
+		pathPart = fallback
+	}
+
+	if u.RawQuery != "" {
+		return pathPart + "?" + u.RawQuery
+	}
+	return pathPart
+}
+
+func (s *AuthService) redirectSSOError(c *gin.Context, code, reason string) {
+	q := url.Values{}
+	q.Set("sso_error", code)
+	if reason != "" {
+		q.Set("reason", reason)
+	}
+	http.Redirect(c.Writer, c.Request, "/axion/pentest?"+q.Encode(), http.StatusSeeOther)
+}
+
+func (s *AuthService) markSSOJTI(id string, exp time.Time) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+
+	now := time.Now().Unix()
+	s.ssoJTILock.Lock()
+	defer s.ssoJTILock.Unlock()
+
+	for key, expiry := range s.ssoJTISeen {
+		if expiry <= now {
+			delete(s.ssoJTISeen, key)
+		}
+	}
+
+	if _, exists := s.ssoJTISeen[id]; exists {
+		return false
+	}
+	s.ssoJTISeen[id] = exp.Unix()
+	return true
+}
+
+func (s *AuthService) getPrivilegesByRole(roleID uint64) ([]string, error) {
+	var privs []string
+	err := s.db.Table("privileges").Where("role_id = ?", roleID).Pluck("name", &privs).Error
+	if err != nil {
+		return nil, err
+	}
+	return privs, nil
+}
+
+func (s *AuthService) saveSessionForUser(
+	c *gin.Context,
+	user *models.UserPassword,
+	privs []string,
+) error {
+	expires := s.cfg.SessionTimeout
+	uuid, err := rdb.MakeUuidStrFromHash(user.Hash)
+	if err != nil {
+		uuid = user.Mail
+	}
+
+	session := sessions.Default(c)
+	session.Set("uid", user.ID)
+	session.Set("uhash", user.Hash)
+	session.Set("rid", user.RoleID)
+	session.Set("tid", models.UserTypeLocal.String())
+	session.Set("prm", privs)
+	session.Set("gtm", time.Now().Unix())
+	session.Set("exp", time.Now().Add(time.Duration(expires)*time.Second).Unix())
+	session.Set("uuid", uuid)
+	session.Set("uname", user.Name)
+	session.Options(sessions.Options{
+		HttpOnly: true,
+		Secure:   c.Request.TLS != nil,
+		Path:     s.cfg.BaseURL,
+		MaxAge:   expires,
+	})
+	return session.Save()
+}
+
+func (s *AuthService) upsertSegrdSSOUser(claims segrdSSOClaims) (*models.UserPassword, error) {
+	mail := strings.ToLower(strings.TrimSpace(claims.Email))
+	if !strings.Contains(mail, "@") {
+		return nil, fmt.Errorf("invalid email in claims")
+	}
+	name := strings.TrimSpace(claims.Name)
+	if name == "" {
+		name = strings.Split(mail, "@")[0]
+	}
+
+	roleID := claims.RoleID
+	if roleID <= 0 {
+		switch strings.TrimSpace(strings.ToLower(claims.Role)) {
+		case "segrd-admin":
+			roleID = 1
+		default:
+			roleID = 2
+		}
+	}
+
+	var user models.UserPassword
+	err := s.db.Take(&user, "mail = ?", mail).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		rawPassword, pErr := randBase64String(32)
+		if pErr != nil {
+			return nil, pErr
+		}
+		passwordHash, pErr := bcrypt.GenerateFromPassword([]byte(rawPassword), bcrypt.DefaultCost)
+		if pErr != nil {
+			return nil, pErr
+		}
+
+		user = models.UserPassword{
+			Password: string(passwordHash),
+			User: models.User{
+				Hash:   rdb.MakeUserHash(mail),
+				Type:   models.UserTypeLocal,
+				Mail:   mail,
+				Name:   name,
+				Status: models.UserStatusActive,
+				RoleID: uint64(roleID),
+			},
+		}
+		if err = s.db.Create(&user).Error; err != nil {
+			return nil, err
+		}
+		return &user, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	needsSave := false
+	if user.Name != name {
+		user.Name = name
+		needsSave = true
+	}
+	if user.Status != models.UserStatusActive {
+		user.Status = models.UserStatusActive
+		needsSave = true
+	}
+	if user.RoleID != uint64(roleID) {
+		user.RoleID = uint64(roleID)
+		needsSave = true
+	}
+	if user.Type != models.UserTypeLocal {
+		user.Type = models.UserTypeLocal
+		needsSave = true
+	}
+	if strings.TrimSpace(user.Password) == "" {
+		rawPassword, pErr := randBase64String(32)
+		if pErr != nil {
+			return nil, pErr
+		}
+		passwordHash, pErr := bcrypt.GenerateFromPassword([]byte(rawPassword), bcrypt.DefaultCost)
+		if pErr != nil {
+			return nil, pErr
+		}
+		user.Password = string(passwordHash)
+		needsSave = true
+	}
+
+	if needsSave {
+		if err = s.db.Save(&user).Error; err != nil {
+			return nil, err
+		}
+	}
+	return &user, nil
 }
 
 // AuthLogin is function to login user in the system
@@ -178,6 +386,85 @@ func (s *AuthService) AuthLogin(c *gin.Context) {
 		Infof("user made successful local login for '%s'", data.Mail)
 
 	response.Success(c, http.StatusOK, struct{}{})
+}
+
+// AuthSegrdSSO exchanges a short-lived SEGRD-signed token for a PentAGI session.
+// @Summary Login user through SEGRD SSO bridge
+// @Tags Public
+// @Produce json
+// @Param token query string true "Signed SSO token"
+// @Param return_url query string false "Safe relative URL to redirect after auth"
+// @Success 303 "redirect to authenticated app path"
+// @Failure 401 {object} response.errorResp "invalid SSO token"
+// @Router /auth/segrd-sso [get]
+func (s *AuthService) AuthSegrdSSO(c *gin.Context) {
+	if !s.cfg.AxionSSOEnabled {
+		s.redirectSSOError(c, "sso_disabled", "bridge_disabled")
+		return
+	}
+	if strings.TrimSpace(s.cfg.AxionSSOSecret) == "" {
+		s.redirectSSOError(c, "sso_misconfigured", "missing_shared_secret")
+		return
+	}
+
+	tokenString := c.Query("token")
+	if strings.TrimSpace(tokenString) == "" {
+		s.redirectSSOError(c, "missing_token", "token_required")
+		return
+	}
+
+	var claims segrdSSOClaims
+	token, err := jwt.ParseWithClaims(
+		tokenString,
+		&claims,
+		func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
+			}
+			return []byte(s.cfg.AxionSSOSecret), nil
+		},
+		jwt.WithAudience(s.cfg.AxionSSOAudience),
+		jwt.WithIssuer(s.cfg.AxionSSOIssuer),
+	)
+	if err != nil || token == nil || !token.Valid {
+		s.redirectSSOError(c, "invalid_token", "signature_or_claims_invalid")
+		return
+	}
+	if claims.ExpiresAt == nil {
+		s.redirectSSOError(c, "invalid_token", "missing_exp")
+		return
+	}
+	if time.Now().After(claims.ExpiresAt.Time) {
+		s.redirectSSOError(c, "expired_token", "token_expired")
+		return
+	}
+	if !s.markSSOJTI(claims.ID, claims.ExpiresAt.Time) {
+		s.redirectSSOError(c, "replay_detected", "jti_already_used")
+		return
+	}
+
+	user, err := s.upsertSegrdSSOUser(claims)
+	if err != nil {
+		logger.FromContext(c).WithError(err).Error("failed to upsert segrd sso user")
+		s.redirectSSOError(c, "user_sync_failed", "cannot_upsert_user")
+		return
+	}
+
+	privs, err := s.getPrivilegesByRole(user.RoleID)
+	if err != nil {
+		logger.FromContext(c).WithError(err).Error("failed to resolve privileges for sso user")
+		s.redirectSSOError(c, "privileges_failed", "cannot_resolve_privileges")
+		return
+	}
+
+	if err = s.saveSessionForUser(c, user, privs); err != nil {
+		logger.FromContext(c).WithError(err).Error("failed to save sso session")
+		s.redirectSSOError(c, "session_failed", "cannot_save_session")
+		return
+	}
+
+	returnURL := normalizeAxionReturnURL(c.Query("return_url"))
+	http.Redirect(c.Writer, c.Request, returnURL, http.StatusSeeOther)
 }
 
 func (s *AuthService) refreshCookie(c *gin.Context, resp *info, privs []string) error {

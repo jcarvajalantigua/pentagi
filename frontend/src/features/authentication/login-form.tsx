@@ -179,7 +179,7 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                 className="mx-auto grid w-[350px] gap-8"
                 onSubmit={form.handleSubmit(handleSubmit)}
             >
-                <h1 className="text-center text-3xl font-bold">PentAGI</h1>
+                <h1 className="text-center text-3xl font-bold">AXION by jeturing</h1>
 
                 {providers?.length > 0 && (
                     <>
@@ -222,6 +222,7 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                                     <Input
                                         {...field}
                                         autoFocus
+                                        autoComplete="username"
                                         placeholder="Enter your email"
                                     />
                                 </FormControl>
@@ -239,6 +240,7 @@ const LoginForm = ({ providers, returnUrl = '/flows/new' }: LoginFormProps) => {
                                 <FormControl>
                                     <Input
                                         {...field}
+                                        autoComplete="current-password"
                                         placeholder="Enter your password"
                                         type="password"
                                     />

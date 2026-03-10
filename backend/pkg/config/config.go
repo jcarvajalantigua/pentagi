@@ -125,6 +125,12 @@ type Config struct {
 	// Public URL for auth callback
 	PublicURL string `env:"PUBLIC_URL" envDefault:""`
 
+	// AXION SSO bridge (SEGRD -> PentAGI)
+	AxionSSOEnabled      bool   `env:"AXION_SSO_ENABLED" envDefault:"false"`
+	AxionSSOSharedSecret string `env:"AXION_SSO_SHARED_SECRET"`
+	AxionSSOIssuer       string `env:"AXION_SSO_ISSUER" envDefault:"segrd-forensics"`
+	AxionSSOAudience     string `env:"AXION_SSO_AUDIENCE" envDefault:"pentagi-axion"`
+
 	// Traversaal search engine
 	TraversaalAPIKey string `env:"TRAVERSAAL_API_KEY"`
 

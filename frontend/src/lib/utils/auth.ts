@@ -4,12 +4,16 @@
  * @returns URL parameter string (empty string or ?returnUrl=...)
  */
 export const getReturnUrlParam = (currentPath: string): string => {
+    const normalizedPath = currentPath.startsWith('/axion')
+        ? currentPath.slice('/axion'.length) || '/'
+        : currentPath;
+
     // Don't save default route as return URL
-    if (currentPath === '/flows/new' || currentPath === '/login') {
+    if (normalizedPath === '/flows/new' || normalizedPath === '/login') {
         return '';
     }
 
-    return `?returnUrl=${encodeURIComponent(currentPath)}`;
+    return `?returnUrl=${encodeURIComponent(normalizedPath)}`;
 };
 
 /**
@@ -26,7 +30,7 @@ export const getSafeReturnUrl = (returnUrl: null | string, fallback: string): st
 
     // Allow only relative paths: must start with single slash, not //
     if (trimmed.startsWith('/') && !trimmed.startsWith('//')) {
-        return trimmed;
+        return trimmed.startsWith('/axion/') ? trimmed.slice('/axion'.length) : trimmed;
     }
 
     return fallback;

@@ -8,7 +8,7 @@ import { Log } from './log';
 import { getReturnUrlParam } from './utils/auth';
 
 const axios = Axios.create({
-    baseURL: '/api/v1',
+    baseURL: '/axion/api/v1',
     headers: {
         'Content-Type': 'application/json',
     },
@@ -63,10 +63,11 @@ axios.interceptors.response.use(
 
                     // Redirect to login with current URL preserved
                     const currentPath = window.location.pathname;
+                    const isLoginPath = currentPath === '/login' || currentPath === '/axion/login';
 
-                    if (currentPath !== '/login') {
+                    if (!isLoginPath) {
                         const returnParam = getReturnUrlParam(currentPath);
-                        window.location.href = `/login${returnParam}`;
+                        window.location.href = `/axion/login${returnParam}`;
                     }
 
                     break;

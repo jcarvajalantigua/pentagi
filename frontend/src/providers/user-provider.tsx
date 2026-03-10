@@ -117,7 +117,7 @@ export const UserProvider = ({ children }: { children: ReactNode }) => {
                 toast.error('Logout failed, but clearing local session');
             } finally {
                 clearAuth();
-                window.location.href = `/login${finalReturnUrl}`;
+                window.location.href = `/axion/login${finalReturnUrl}`;
             }
         },
         [clearAuth, location.pathname],

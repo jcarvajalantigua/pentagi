@@ -56,6 +56,7 @@ export default defineConfig(({ mode }) => {
     };
 
     return {
+        base: '/axion/',
         build: {
             chunkSizeWarningLimit: 1000,
             minify: 'terser',

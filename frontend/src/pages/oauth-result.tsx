@@ -87,7 +87,7 @@ const OAuthResult = () => {
         } else {
             // If no opener, redirect to login
             updateMessage('Authentication window opened directly. Redirecting to login page...');
-            handleRedirect('/login', errorDelay / 2);
+            handleRedirect('/axion/login', errorDelay / 2);
             handleClose(errorDelay);
         }
 

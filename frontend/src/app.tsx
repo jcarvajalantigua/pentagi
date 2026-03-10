@@ -51,7 +51,7 @@ const App = () => {
         <ApolloProvider client={client}>
             <ThemeProvider>
                 <Toaster />
-                <BrowserRouter>
+                <BrowserRouter basename="/axion">
                     <UserProvider>
                         <FavoritesProvider>
                             <Suspense fallback={<PageLoader />}>

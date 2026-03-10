@@ -111,6 +111,10 @@ func NewRouter(
 			BaseURL:          baseURL,
 			LoginCallbackURL: oauthLoginCallbackURL,
 			SessionTimeout:   4 * 60 * 60, // 4 hours
+			AxionSSOEnabled:  cfg.AxionSSOEnabled,
+			AxionSSOSecret:   cfg.AxionSSOSharedSecret,
+			AxionSSOIssuer:   cfg.AxionSSOIssuer,
+			AxionSSOAudience: cfg.AxionSSOAudience,
 		},
 		orm,
 		oauthClients,
@@ -183,6 +187,7 @@ func NewRouter(
 		authGroup := publicGroup.Group("/auth")
 		{
 			authGroup.POST("/login", authService.AuthLogin)
+			authGroup.GET("/segrd-sso", authService.AuthSegrdSSO)
 			authGroup.GET("/logout", authService.AuthLogout)
 			authGroup.GET("/authorize", authService.AuthAuthorize)
 			authGroup.GET("/login-callback", authService.AuthLoginGetCallback)
